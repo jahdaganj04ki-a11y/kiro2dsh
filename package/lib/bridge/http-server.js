@@ -13,6 +13,8 @@
 
 import { createServer } from 'node:http'
 
+import { statusForError } from './router.js'
+
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'content-length'])
 
 /** Response headers every bridge reply carries. */
@@ -81,6 +83,13 @@ export function createBridgeServer(options) {
 
   const dispatch = async (req, res) => {
     const started = Date.now()
+    if (req.method === 'OPTIONS') {
+      // A browser client in a page (a web build of a CLI, a playground) preflights
+      // before it sends a body. Answering here keeps the router free of CORS.
+      res.writeHead(204, { ...CORS_HEADERS, 'Content-Length': '0' })
+      res.end()
+      return
+    }
     inflight.add(res)
     const controller = new AbortController()
     req.on('aborted', () => controller.abort(new Error('client disconnected')))
@@ -111,7 +120,7 @@ export function createBridgeServer(options) {
       // Headers may already be out (the usual case for SSE), so the only safe
       // signal left is to end the stream — the client sees a truncated body.
       if (!res.headersSent) {
-        const status = statusFor(error)
+        const status = statusForError(error)
         res.writeHead(status, { ...CORS_HEADERS, 'Content-Type': 'application/json; charset=utf-8' })
         res.end(JSON.stringify({ error: { message: error?.message || String(error), type: status >= 500 ? 'upstream_error' : 'invalid_request_error', code: error?.code || null } }))
       } else {
@@ -231,15 +240,6 @@ function plainHeaders(headers) {
     out[name] = value
   }
   return out
-}
-
-function statusFor(error) {
-  if (Number.isInteger(error?.status)) return error.status
-  const code = error?.code
-  if (code === 'auth' || code === 'kiro_not_configured' || code === 'kiro_refresh_expired') return 401
-  if (code === 'rejected') return 400
-  if (code === 'rate_limit') return 429
-  return 502
 }
 
 /** True for the addresses that cannot be reached from another machine. */

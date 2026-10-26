@@ -9,6 +9,10 @@
  * @module test/helpers
  */
 
+import { describeAccount } from '../lib/auth/store.js'
+import { ChunkBuilder } from '../lib/turn.js'
+
+const chunkBuilders = { ChunkBuilder }
 import { encodeEventFrame, parseEventFrame } from '../lib/kiro/eventstream.js'
 
 /** A minimal in-memory credential pool with the store's method names. */
@@ -64,7 +68,9 @@ export function fakeStore(accounts = [], options = {}) {
     describe: async () => ({
       activeId: pool.activeId,
       configured: pool.accounts.length > 0,
-      accounts: pool.accounts.map(account => ({ ...account })),
+      // The real store answers with the secret-free view; `rawDescribe` reproduces the
+      // mistake so the bridge's own redaction can be tested against it.
+      accounts: pool.accounts.map(entry => (options.rawDescribe ? { ...entry } : describeAccount(entry))),
     }),
     noteFailure: async (id, error) => {
       calls.push(['noteFailure', id, error?.code])
@@ -250,4 +256,34 @@ export function tokenFetch(replies) {
     return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers })
   }
   return { fetch, calls }
+}
+
+/**
+ * Turn a short script into the harness chunk stream the renderers consume.
+ *
+ * Built with the plugin's own `ChunkBuilder`, so a renderer test that passes here
+ * also proves the builder still produces the protocol the bridge expects.
+ */
+export function buildChunks(script) {
+  const { ChunkBuilder } = chunkBuilders
+  const builder = new ChunkBuilder()
+  for (const step of script) {
+    if (step.text !== undefined) builder.text(step.text)
+    if (step.reasoning !== undefined) builder.reasoning(step.reasoning)
+    if (step.tool) builder.toolCall(step.tool)
+    if (step.usage) builder.usage(step.usage)
+    if (step.finish) builder.finish(step.finish)
+    if (step.error) builder.error(step.error)
+  }
+  return builder.chunks
+}
+
+/** A minimal async iterable over an array of chunks. */
+export function iterable(chunks) {
+  let index = 0
+  return {
+    [Symbol.asyncIterator]: () => ({
+      next: async () => (index < chunks.length ? { value: chunks[index++], done: false } : { value: undefined, done: true }),
+    }),
+  }
 }

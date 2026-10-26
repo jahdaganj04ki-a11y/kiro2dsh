@@ -31,8 +31,16 @@ function textPart(value) {
   return typeof value === 'string' && value.length > 0 ? [{ type: 'text', text: value }] : []
 }
 
+/**
+ * An image block, or null when Kiro would not accept the bytes as an image.
+ *
+ * Relabelling `image/bmp` as `image/png` is not a fix: the decoder reads the
+ * payload, not the label, and the turn fails with an opaque decode error. An
+ * attachment we cannot carry is said out loud instead.
+ */
 function imageBlock(mimeType, base64) {
-  const mediaType = IMAGE_MEDIA_TYPES.has(String(mimeType || '').toLowerCase()) ? String(mimeType).toLowerCase() : 'image/png'
+  const mediaType = String(mimeType || '').toLowerCase()
+  if (!IMAGE_MEDIA_TYPES.has(mediaType)) return null
   return { type: 'image', mediaType, data: base64 }
 }
 
@@ -82,8 +90,9 @@ function openaiContent(content) {
     if (part.type === 'image_url' || part.type === 'input_image') {
       const url = part.image_url?.url || part.url || part.image_url
       const parsed = typeof url === 'string' ? parseDataUri(url) : null
-      if (parsed) blocks.push(imageBlock(parsed.mimeType, parsed.base64))
-      else if (typeof url === 'string' && /^https?:/iu.test(url)) {
+      if (parsed) {
+        blocks.push(imageBlock(parsed.mimeType, parsed.base64) || { type: 'text', text: `[Unsupported attachment: ${parsed.mimeType}]` })
+      } else if (typeof url === 'string' && /^https?:/iu.test(url)) {
         // Kiro takes base64 only; a remote URL is preserved as text so the model
         // can still cite it instead of the request failing on an empty turn.
         blocks.push({ type: 'text', text: `[Image: ${url}]` })
@@ -110,8 +119,8 @@ function anthropicContent(content) {
         break
       case 'image': {
         const base64 = part.source?.type === 'base64' ? part.source.data : undefined
-        if (base64) blocks.push(imageBlock(part.source?.media_type, base64))
-        else blocks.push({ type: 'text', text: `[Image: ${part.source?.url || 'unsupported source'}]` })
+        const block = base64 ? imageBlock(part.source?.media_type, base64) : null
+        blocks.push(block || { type: 'text', text: `[Image: ${base64 ? `unsupported media type ${part.source?.media_type || 'unknown'}` : part.source?.url || 'unsupported source'}]` })
         break
       }
       case 'tool_use':
@@ -205,9 +214,16 @@ export function toCanonicalRequest(body, format) {
   const temperature = Number(body.temperature)
   const stop = Array.isArray(body.stop) ? body.stop : typeof body.stop === 'string' ? [body.stop] : Array.isArray(body.stop_sequences) ? body.stop_sequences : undefined
   const effort = resolveEffort(body)
+  let rawMessages = Array.isArray(body.messages) ? body.messages : Array.isArray(body.input) ? body.input : []
+  if (format === 'anthropic' && body.system !== undefined && !rawMessages.some(entry => entry?.role === 'system')) {
+    // Claude Code and the Anthropic SDK send the instructions as a top-level field.
+    // Folding it in as a system message is what keeps them from arriving as nothing.
+    // `messages[]` wins when a client sends both, so nothing is said twice.
+    rawMessages = [{ role: 'system', content: body.system }, ...rawMessages]
+  }
   return {
     model,
-    messages: toMessages(body.messages ?? body.input, format),
+    messages: toMessages(rawMessages, format),
     tools: toToolSchemas(body, format),
     ...(Number.isInteger(maxTokens) && maxTokens > 0 ? { maxTokens } : {}),
     ...(Number.isFinite(temperature) ? { temperature } : {}),

@@ -25,6 +25,7 @@ import { estimateTokens, requestText, toCanonicalRequest } from './formats.js'
 import { KiroError, ERROR_CODES } from '../errors.js'
 import { catalogOrder, describeCapabilities } from '../catalog.js'
 import { KIRO_MODEL_PREFIXES } from '../constants.js'
+import { describeAccount } from '../auth/store.js'
 
 const JSON_HEADERS = Object.freeze({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
 
@@ -138,7 +139,7 @@ export function modelList(catalog, format) {
  *   runTurn: (request: object, options?: object) => AsyncGenerator<object>,
  *   catalog: () => object[],
  *   settings: () => object,
- *   store?: { describe(): Promise<object[]> },
+ *   store?: { describe(): Promise<object[] | { accounts: object[], activeId: string | null, configured: boolean }> },
  *   usage?: () => Promise<object | null>,
  *   log?: object,
  * }} deps
@@ -158,11 +159,28 @@ export function createBridgeRouter(deps) {
         return json(modelList(deps.catalog(), url.searchParams.get('format') || (path.startsWith('/v1/messages') ? 'anthropic' : 'openai')))
       }
       if (request.method === 'GET' && path === '/v1/kiro/status') {
-        const [accounts, usage] = await Promise.all([
-          deps.store?.describe?.() ?? Promise.resolve([]),
-          deps.usage?.().catch(() => null),
+        // `describe()` answers with the pool view (`{ activeId, configured, accounts }`)
+        // and some callers only have the list; both are accepted so the panel never
+        // has to know which one it is talking to.
+        const [described, usage] = await Promise.all([
+          Promise.resolve(deps.store?.describe?.() ?? []).catch(() => null),
+          deps.usage?.().catch(() => null) ?? Promise.resolve(null),
         ])
-        return json({ accounts, usage, catalog: catalogOrder(deps.catalog()).length, settings: publicSettings(settings) })
+        const listed = Array.isArray(described) ? described : (described?.accounts ?? [])
+        // Belt and braces: the panel endpoint may be reachable without a bridge
+        // secret, so a record that still carries a credential is reduced here rather
+        // than trusted to have been reduced by whoever supplied it.
+        const accounts = listed.map(entry => (entry && (entry.accessToken || entry.refreshToken || entry.apiKey || entry.clientSecret))
+          ? describeAccount(entry)
+          : entry)
+        return json({
+          activeId: Array.isArray(described) ? null : (described?.activeId ?? null),
+          configured: Array.isArray(described) ? described.length > 0 : (described?.configured ?? false),
+          accounts,
+          usage,
+          catalog: catalogOrder(deps.catalog()).length,
+          settings: publicSettings(settings),
+        })
       }
       if (request.method !== 'POST') return json({ error: { message: `unsupported method ${request.method} ${path}`, type: 'invalid_request_error' } }, 405)
 
@@ -232,13 +250,38 @@ function publicSettings(settings) {
   }
 }
 
+/**
+ * HTTP status for a plugin error, by code rather than by message.
+ *
+ * Shared with the carrier, because a request that dies before the router answers
+ * (a body that will not fit in memory, a handler that throws) has to be reported
+ * with the same status the router would have chosen.
+ */
+export function statusForError(error) {
+  if (Number.isInteger(error?.status)) return error.status
+  switch (error?.code) {
+    case ERROR_CODES.auth:
+    case ERROR_CODES.notConfigured:
+    case ERROR_CODES.refreshExpired:
+    case ERROR_CODES.invalidCredential:
+      return 401
+    case ERROR_CODES.rejected:
+    case ERROR_CODES.invalidPayload:
+      return 400
+    case ERROR_CODES.rateLimit:
+    case ERROR_CODES.quota:
+      return 429
+    case ERROR_CODES.timeout:
+      return 504
+    case ERROR_CODES.modelUnavailable:
+      return 404
+    default:
+      return 502
+  }
+}
+
 /** The error envelope both formats accept — a 4xx/5xx with a JSON body only. */
 function errorResponse(error) {
-  const status = Number.isInteger(error?.status) ? error.status
-    : error?.code === ERROR_CODES.auth || error?.code === ERROR_CODES.notConfigured || error?.code === ERROR_CODES.refreshExpired ? 401
-      : error?.code === ERROR_CODES.rejected ? 400
-        : error?.code === ERROR_CODES.rateLimit ? 429
-          : error?.code === ERROR_CODES.timeout ? 504
-            : 502
+  const status = statusForError(error)
   return json({ error: { message: error?.message || String(error), type: status >= 500 ? 'upstream_error' : 'invalid_request_error', code: error?.code || null, ...(status >= 500 ? { retryable: error?.retryable ?? true } : {}) } }, status)
 }

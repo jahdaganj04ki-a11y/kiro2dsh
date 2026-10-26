@@ -44,10 +44,13 @@ function openaiUsage(usage) {
   const input = Number(usage.inputTokens) || 0
   const output = Number(usage.outputTokens) || 0
   const cacheRead = Number(usage.cacheReadTokens) || 0
+  // Kiro reports cache reads as a separate bucket (Anthropic semantics), so they are
+  // added to the prompt here; and `total_tokens` is defined by this format as
+  // prompt + completion, which is not the same number Kiro totals.
   return {
     prompt_tokens: input + cacheRead,
     completion_tokens: output,
-    total_tokens: Number(usage.totalTokens) || input + cacheRead + output,
+    total_tokens: input + cacheRead + output,
     ...(cacheRead ? { prompt_tokens_details: { cached_tokens: cacheRead } } : {}),
     ...(usage.kiroCredits !== undefined ? { kiro: { credits: usage.kiroCredits, unit: usage.kiroCreditUnit || 'credit' } } : {}),
   }
@@ -199,7 +202,10 @@ export async function* anthropicSSE(chunks, options) {
     }
     if (chunk.type === 'block-start') {
       const kind = chunk.blockType === 'reasoning' ? 'thinking' : chunk.blockType === 'tool-call' ? 'tool_use' : 'text'
-      blocks.set(chunk.index, { kind, started: false })
+      // `started` has to be set here: a later delta for the same index must not open
+      // the block a second time, which a strict SDK reads as two blocks at one index.
+      const block = { kind, started: kind !== 'tool_use' }
+      blocks.set(chunk.index, block)
       if (kind === 'thinking') {
         yield sse('content_block_start', { type: 'content_block_start', index: chunk.index, content_block: { type: 'thinking', thinking: '' } })
       } else if (kind === 'tool_use') {
@@ -269,7 +275,8 @@ export async function* anthropicSSE(chunks, options) {
       if (chunk.reason?.failure) {
         yield sse('error', { type: 'error', error: { type: 'upstream_error', message: chunk.reason.failure.message } })
       }
-      yield sse('message_delta', { type: 'message_delta', delta: { stop_reason: lastStop, stop_sequence: null }, usage: { output_tokens: usage.output_tokens } })
+      // Clients bill from this frame, so it carries the input counts as well.
+      yield sse('message_delta', { type: 'message_delta', delta: { stop_reason: lastStop, stop_sequence: null }, usage })
       yield sse('message_stop', { type: 'message_stop' })
     }
   }

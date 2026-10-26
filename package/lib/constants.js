@@ -268,13 +268,14 @@ export const AUTH_METHODS = Object.freeze([
 ])
 
 /**
- * Id prefixes that identify a Kiro model on the wire.
+ * Name spaces a caller may hang in front of a Kiro model id, all of them tolerated.
  *
- * The bridge lists every Kiro id under both `/v1/models` shapes. A caller is not
- * forced into one prefix — an unlisted id is forwarded verbatim after the alias
- * fold, so a model Kiro added yesterday still works while the seed catalog ages.
+ * `kiro/…` is the spelling CLI configurations reach for when several providers share
+ * one endpoint; `aws/kiro/…` is what an AWS-prefixed preset uses. Both are stripped
+ * before the id is looked up, so an unlisted model still arrives at Kiro as its own
+ * name instead of a namespaced 400.
  */
-export const KIRO_MODEL_PREFIXES = Object.freeze(['auto', 'kiro-auto', 'kiro/', 'aws/kiro/'])
+export const KIRO_MODEL_PREFIXES = Object.freeze(['aws/kiro/', 'kiro/', 'kiro-auto/'])
 
 /** Human labels for each auth method; the client renders them through locale. */
 export const AUTH_METHOD_LABELS = Object.freeze({

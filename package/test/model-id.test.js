@@ -65,3 +65,19 @@ test('an effort override rides on top of a snapshot id', () => {
   assert.equal(intent.upstream, 'claude-opus-4.5')
   assert.deepEqual(intent.thinkingOverride, { mode: 'level', level: 'max' })
 })
+
+test('a namespaced id is unwrapped before it is looked up or sent', () => {
+  for (const prefix of ['kiro/', 'aws/kiro/', 'kiro-auto/']) {
+    const intent = resolveModelIntent(`${prefix}claude-sonnet-4.5`)
+    assert.equal(intent.model, 'claude-sonnet-4.5', `${prefix} must not reach the catalog lookup`)
+    assert.equal(intent.upstream, 'claude-sonnet-4.5')
+    assert.equal(intent.requested, `${prefix}claude-sonnet-4.5`, 'the caller spelling survives for the error message')
+  }
+  // A model nobody has listed yet is forwarded after the fold - but never with a
+  // namespace still attached, which Kiro would answer with INVALID_MODEL_ID.
+  const unlisted = resolveModelIntent('kiro/next-big-thing')
+  assert.equal(unlisted.model, 'next-big-thing')
+  assert.equal(unlisted.upstream, 'next-big-thing')
+  assert.equal(resolveModelIntent('kiro/').model, 'kiro/', 'a prefix alone is not a model')
+  assert.equal(resolveModelIntent('KIRO/CLAUDE-SONNET-4-5').upstream, 'claude-sonnet-4.5')
+})

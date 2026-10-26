@@ -21,7 +21,7 @@
  * @module lib/model-id
  */
 
-import { AGENTIC_SUFFIX, THINKING_SUFFIX } from './constants.js'
+import { AGENTIC_SUFFIX, KIRO_MODEL_PREFIXES, THINKING_SUFFIX } from './constants.js'
 
 const SNAPSHOT_SUFFIX = /-\d{8}$/u
 
@@ -100,6 +100,12 @@ export function isSyntheticVariant(model) {
 export function resolveModelIntent(model) {
   const { cleanModel, override } = parseSuffix(model)
   let upstream = String(cleanModel ?? '')
+  // Strip a provider namespace before anything else looks at the id: the fold below
+  // is keyword based and survives it, but an unlisted id would otherwise be sent to
+  // Kiro with the namespace still attached.
+  const lower = upstream.toLowerCase()
+  const prefix = KIRO_MODEL_PREFIXES.find(candidate => lower.startsWith(candidate))
+  if (prefix && upstream.length > prefix.length) upstream = upstream.slice(prefix.length)
   let agentic = false
   let thinking = false
   if (upstream.endsWith(AGENTIC_SUFFIX)) {
