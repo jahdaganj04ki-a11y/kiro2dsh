@@ -220,7 +220,7 @@ export async function apply(ctx, config) {
         const hit = await credentials?.resolve?.(isCredentialRefName(ref) ? credentialRef(ref) : ref)
         value = hit?.value || null
       } catch (error) {
-        log?.warn?.('kiro: route "%s" names apiKeyEnv "%s" but it did not resolve; %s', route, ref, error?.message || error)
+        log?.warn?.(`kiro: route "${route}" names apiKeyEnv "${ref}" but it did not resolve; ${error?.message || error}`)
         continue
       }
       if (!value) continue
@@ -236,7 +236,7 @@ export async function apply(ctx, config) {
         // Keys do not rotate; a far horizon keeps the proactive refresh path idle.
         expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
       })
-      log?.info?.('kiro: adopted the API key for route "%s" from its credential ref', route)
+      log?.info?.(`kiro: adopted the API key for route "${route}" from its credential ref`)
     }
   }
 
@@ -426,14 +426,14 @@ export async function apply(ctx, config) {
       settings: () => settingsFor(DEFAULT_ROUTE),
     })
     serverState = await server.start()
-    log?.info?.('kiro: bridge ready; url=%s loopback=%s', serverState.url, isLoopbackHost(serverState.host))
+    log?.info?.(`kiro: bridge ready; url=${serverState.url} loopback=${isLoopbackHost(serverState.host)}`)
     return serverState
   }
   async function stopServer() {
     try {
       await server?.stop()
     } catch (error) {
-      log?.warn?.('kiro: bridge shutdown failed; %s', error?.message || error)
+      log?.warn?.(`kiro: bridge shutdown failed; ${error?.message || error}`)
     }
     server = null
     serverState = null
@@ -443,7 +443,7 @@ export async function apply(ctx, config) {
     // A plugin that opens a socket has to close it, or the next activation inside
     // the same process finds the port taken.
     ensureServer().catch(error => {
-      log?.error?.('kiro: bridge failed to start; %s', error?.message || error)
+      log?.error?.(`kiro: bridge failed to start; ${error?.message || error}`)
     })
     return () => {
       void stopServer()
@@ -451,7 +451,7 @@ export async function apply(ctx, config) {
   })
   ctx.on('loader/volatile-update', () => {
     void refreshBridgeToken()
-    ensureServer().catch(error => log?.error?.('kiro: bridge restart failed; %s', error?.message || error))
+    ensureServer().catch(error => log?.error?.(`kiro: bridge restart failed; ${error?.message || error}`))
   })
 
   // --- catalog + local-credential bootstrap ------------------------------------
@@ -471,14 +471,14 @@ export async function apply(ctx, config) {
             settings: settingsFor(DEFAULT_ROUTE),
             log,
           })
-          log?.info?.('kiro: imported the local Kiro session; status=%s', result.status)
+          log?.info?.(`kiro: imported the local Kiro session; status=${result.status}`)
         }
         publishCatalog(await refreshCatalog(DEFAULT_ROUTE))
-        log?.info?.('kiro: catalog ready; models=%s routes=%s', routeCatalog.size, routes().join(','))
+        log?.info?.(`kiro: catalog ready; models=${routeCatalog.size} routes=${routes().join(',')}`)
       } catch (error) {
         // Bootstrap failures must not break activation: the settings panel is how a
         // user fixes them, and a plugin that throws here never renders.
-        log?.warn?.('kiro: bootstrap incomplete; %s', error?.message || error)
+        log?.warn?.(`kiro: bootstrap incomplete; ${error?.message || error}`)
       }
     })()
   })

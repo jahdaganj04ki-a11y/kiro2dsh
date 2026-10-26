@@ -108,16 +108,34 @@ export function createUsageProvider(deps) {
   const ttl = Number.isFinite(deps.ttlMs) && deps.ttlMs > 0 ? deps.ttlMs : USAGE_TTL_MS
   const now = deps.now || (Date.now.bind(Date.now))
   let cache = { key: null, at: 0, snapshot: null }
-  let pending = null
+  /** One shared read at a time; assigned before any await, so it cannot be missed. */
+  let inflight = null
 
-  const get = async (force = false) => {
-    const credentials = await deps.credentialsFor?.()
-    if (!credentials || (!credentials.accessToken && !credentials.apiKey)) return toUsageSnapshot(null, now())
-    const key = `${credentials.region || ''}|${credentials.profileArn || ''}|${(credentials.accessToken || credentials.apiKey).slice(-12)}`
-    if (!force && cache.key === key && now() - cache.at < ttl && cache.snapshot) return cache.snapshot
-    if (pending) return pending
-    pending = (async () => {
+  /**
+   * The snapshot for the active account.
+   *
+   * The cache is keyed per credential, so switching accounts is never answered with
+   * the previous account's line. An in-flight read is shared, which is why this
+   * function decides synchronously before it awaits anything.
+   */
+  const get = (force = false) => {
+    if (inflight) return inflight
+    inflight = (async () => {
       try {
+        // The cache is consulted here rather than above: the key is part of the
+        // credential, so deciding before the store is read could show one account's
+        // balance to another. Sharing one in-flight read is the cheaper trade.
+        const credentials = await deps.credentialsFor?.()
+        if (!credentials || (!credentials.accessToken && !credentials.apiKey)) return toUsageSnapshot(null, now())
+        // The account is what Kiro meters, so its id leads the cache key; the
+        // credential tail makes a re-login on the same id refresh the numbers.
+        const key = [
+          credentials.id || '',
+          credentials.region || '',
+          credentials.profileArn || '',
+          (credentials.accessToken || credentials.apiKey || '').slice(-12),
+        ].join('|')
+        if (!force && cache.key === key && cache.snapshot && now() - cache.at < ttl) return cache.snapshot
         const data = await fetchUsageLimits({
           credentials,
           ...(deps.fetch ? { fetch: deps.fetch } : {}),
@@ -125,11 +143,16 @@ export function createUsageProvider(deps) {
         })
         cache = { key, at: now(), snapshot: toUsageSnapshot(data, now()) }
         return cache.snapshot
+      } catch (error) {
+        // A quota endpoint that is down is information, not a failure: the panel
+        // shows "quota unavailable" and the conversation proceeds. Nothing is cached,
+        // so a keychain that unlocks between two reads is picked up on the next one.
+        return { ...toUsageSnapshot(null, now()), error: error?.message || String(error) }
       } finally {
-        pending = null
+        inflight = null
       }
     })()
-    return pending
+    return inflight
   }
 
   return {

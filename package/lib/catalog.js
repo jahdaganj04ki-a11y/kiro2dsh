@@ -454,7 +454,14 @@ export function mergeLiveCatalog(catalog, liveModels = []) {
     const upstreamId = live.modelId || live.id
     if (!upstreamId) continue
     seen.add(upstreamId)
-    const seed = [...next.values()].find(model => model.upstream === upstreamId && !model.variantOf)
+    // Kiro's listing is authoritative about *capability* but not about spelling:
+    // an id can arrive as `claude-sonnet-4-5` or `Claude_Sonnet_4.5`. Comparing the
+    // folded forms is what keeps a renamed family from being read as "this account
+    // cannot use anything", which would empty the picker.
+    const folded = foldUpstreamModelId(upstreamId)
+    seen.add(folded)
+    const seed = [...next.values()].find(model => !model.variantOf
+      && (model.upstream === upstreamId || model.upstream === folded || foldUpstreamModelId(model.upstream) === folded))
     const merged = mergeLiveModel(seed, { ...live, modelId: upstreamId })
     if (seed) {
       next.set(seed.id, merged)
@@ -490,7 +497,11 @@ export function mergeLiveCatalog(catalog, liveModels = []) {
       }
     }
   }
-  return { catalog: next, missing: [...next.values()].filter(model => !model.variantOf && !seen.has(model.upstream)).map(model => model.id) }
+  const missing = [...next.values()].filter(model => !model.variantOf
+    && !seen.has(model.upstream)
+    && !seen.has(foldUpstreamModelId(model.upstream))
+    && !seen.has(model.id)).map(model => model.id)
+  return { catalog: next, missing }
 }
 
 /** Look one id up in a catalog, tolerating dash/dot spellings and vendor aliases. */
@@ -602,6 +613,27 @@ export function describeCapabilities(model) {
 }
 
 /** Display order for the selector: strongest capable model first, variants after their base. */
+/**
+ * A catalog limited to an explicitly listed set of models.
+ *
+ * A profile that names its own models is answering "what may this account offer",
+ * so the seed table must not be added back on top of it — otherwise hiding a model
+ * is impossible. Variants of a listed model are kept, because they are how the
+ * picker reaches that model's thinking and agentic modes.
+ *
+ * @param {object[]} models entries with at least an `id`
+ * @returns {Map<string, object>}
+ */
+export function listedCatalog(models = []) {
+  const keyed = Object.fromEntries(models
+    .filter(entry => entry && typeof entry.id === 'string' && entry.id)
+    .map(entry => [entry.id, entry]))
+  if (Object.keys(keyed).length === 0) return new Map()
+  const full = buildCatalog(keyed)
+  const roots = new Set(Object.keys(keyed))
+  return new Map([...full].filter(([, model]) => roots.has(model.id) || (model.variantOf && roots.has(model.variantOf))))
+}
+
 export function catalogOrder(catalog) {
   const rank = id => {
     const order = ['opus', 'sonnet', 'gpt', 'haiku', 'glm', 'kimi', 'minimax', 'deepseek', 'qwen', 'auto']

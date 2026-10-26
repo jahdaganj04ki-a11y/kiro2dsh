@@ -18,7 +18,7 @@
  */
 
 import { credentialsFor, createTurnRunner } from './turn.js'
-import { buildCatalog, catalogOrder, findModel, mergeLiveCatalog, reasoningInfo } from './catalog.js'
+import { buildCatalog, catalogOrder, findModel, listedCatalog, mergeLiveCatalog, reasoningInfo } from './catalog.js'
 import { ERROR_CODES, asKiroError } from './errors.js'
 import { fetchKiroCatalog, fetchProfileArn } from './kiro/catalog-api.js'
 
@@ -27,26 +27,47 @@ import { fetchKiroCatalog, fetchProfileArn } from './kiro/catalog-api.js'
 export const DEFAULT_ROUTE = 'kiro'
 
 /**
+ * Codes the harness defines for itself, which must survive the mapping untouched.
+ *
+ * `EMPTY_RESPONSE` and `CONTEXT_WINDOW_EXCEEDED` reach us from the turn reducer
+ * rather than from a Kiro status, and the retry/compaction services read those
+ * exact strings; translating them again would silently disable that routing.
+ */
+const HARNESS_NATIVE_CODES = Object.freeze([
+  'AUTH', 'MISSING_CREDENTIAL', 'INVALID_CREDENTIAL', 'RATE_LIMIT', 'QUOTA', 'ACCOUNT_QUOTA',
+  'CONTEXT_WINDOW_EXCEEDED', 'IMAGE_OFFLOAD_REQUIRED', 'EMPTY_RESPONSE', 'INVALID_REQUEST',
+  'TIMEOUT', 'TRANSPORT', 'SERVER', 'NO_ADAPTER', 'INVALID_ARGS',
+])
+
+/**
  * Map a plugin failure onto the harness failure codes the loop routes on.
  *
- * `AUTH`/`MISSING_CREDENTIAL` gate a re-auth prompt, `RATE_LIMIT` and
- * `CONTEXT_WINDOW_EXCEEDED` drive retry and compaction, and everything upstream
- * stays `UPSTREAM_*` so the loop can fail the attempt without blaming the user.
+ * The vocabulary is the one the shipped adapter uses (`dsh-llm-pi-ai`): `AUTH`
+ * gates a re-auth prompt, `MISSING_CREDENTIAL`/`INVALID_CREDENTIAL` say whether to
+ * supply or correct a value, `RATE_LIMIT` and `QUOTA` separate "back off" from
+ * "the account is spent", `INVALID_REQUEST` means the conversation itself is at
+ * fault, and `TRANSPORT`/`SERVER` keep a network or upstream fault away from the
+ * user's blame. Anything unmapped stays `UPSTREAM_ERROR` — a guess is worse than
+ * an unknown, because the loop would retry the wrong things.
  */
 export function toHarnessFailureCode(code) {
+  if (typeof code === 'string' && HARNESS_NATIVE_CODES.includes(code)) return code
   return {
     [ERROR_CODES.auth]: 'AUTH',
-    [ERROR_CODES.notConfigured]: 'MISSING_CREDENTIAL',
     [ERROR_CODES.refreshExpired]: 'AUTH',
+    [ERROR_CODES.notConfigured]: 'MISSING_CREDENTIAL',
+    [ERROR_CODES.invalidCredential]: 'INVALID_CREDENTIAL',
     [ERROR_CODES.rateLimit]: 'RATE_LIMIT',
-    [ERROR_CODES.quota]: 'RATE_LIMIT',
-    [ERROR_CODES.context]: 'CONTEXT_WINDOW_EXCEEDED',
-    [ERROR_CODES.image]: 'IMAGE_OFFLOAD_REQUIRED',
-    [ERROR_CODES.invalidModel]: 'INVALID_MODEL',
-    [ERROR_CODES.timeout]: 'UPSTREAM_TIMEOUT',
-    [ERROR_CODES.endpoint]: 'UPSTREAM_UNAVAILABLE',
-    [ERROR_CODES.rejected]: 'REJECTED_BY_UPSTREAM',
-    [ERROR_CODES.stream]: 'UPSTREAM_STREAM_ERROR',
+    [ERROR_CODES.quota]: 'QUOTA',
+    [ERROR_CODES.modelUnavailable]: 'INVALID_REQUEST',
+    [ERROR_CODES.invalidPayload]: 'INVALID_REQUEST',
+    [ERROR_CODES.badRequest]: 'INVALID_REQUEST',
+    [ERROR_CODES.rejected]: 'INVALID_REQUEST',
+    [ERROR_CODES.timeout]: 'TIMEOUT',
+    [ERROR_CODES.endpoint]: 'TRANSPORT',
+    [ERROR_CODES.corruptStream]: 'TRANSPORT',
+    [ERROR_CODES.aborted]: 'ABORTED',
+    [ERROR_CODES.upstream]: 'SERVER',
   }[code] || 'UPSTREAM_ERROR'
 }
 
@@ -114,6 +135,7 @@ export function createKiroAdapter(deps) {
     const global = deps.settings?.() || {}
     return {
       ...global,
+      ...(profile.displayName ? { displayName: profile.displayName } : {}),
       ...(profile.region ? { region: profile.region } : {}),
       ...(profile.profileArn ? { profileArn: profile.profileArn } : {}),
       ...(Array.isArray(profile.surfaces) && profile.surfaces.length > 0 ? { surfaces: profile.surfaces } : {}),
@@ -148,7 +170,7 @@ export function createKiroAdapter(deps) {
     if (Array.isArray(profile.models) && profile.models.length > 0) {
       // An explicit `models` list is the caller's answer to Kiro's, so it wins
       // wholesale rather than being merged into the seed table.
-      return catalogOrder(buildCatalog(Object.fromEntries(profile.models.map(entry => [entry.id, entry]))))
+      return catalogOrder(listedCatalog(profile.models))
     }
     return catalogOrder(catalogFor(route))
   }
@@ -202,12 +224,12 @@ export function createKiroAdapter(deps) {
       // because a stale listing is not proof that a model is unavailable.
       unavailable = new Set(missing || [])
       catalogRoute = route
-      deps.log?.info?.(`kiro: catalog refreshed; models=%s hidden=%s route="%s"`, catalog.size, unavailable.size, route)
+      deps.log?.info?.(`kiro: catalog refreshed; models=${catalog.size} hidden=${unavailable.size} route="${route}"`)
       return catalogOrder(catalog)
     } catch (error) {
       // A failed refresh keeps the previous catalog instead of emptying it, so
       // an offline laptop can still run a conversation from the seed table.
-      deps.log?.warn?.(`kiro: catalog refresh failed (${error?.message || error}); keeping %s models`, catalog.size || 'the seed')
+      deps.log?.warn?.(`kiro: catalog refresh failed (${error?.message || error}); keeping ${catalog.size || 'the seed'} models`)
       return catalogOrder(catalogFor(route))
     }
   }
@@ -312,7 +334,16 @@ function buildAdapter(harness) {
     const generator = harness.runner.streamTurn(options)
     return (async function* () {
       try {
-        for await (const chunk of generator) yield chunk
+        for await (const chunk of generator) {
+          // A terminal failure arrives in-band once the assistant message is
+          // durable, and its `failure.code` is what the retry policy and the
+          // re-auth prompt read — so it is translated here, not only when thrown.
+          if (chunk?.type === 'finish' && chunk.reason?.failure) {
+            yield { ...chunk, reason: { ...chunk.reason, failure: { ...chunk.reason.failure, code: toHarnessFailureCode(chunk.reason.failure.code) } } }
+            continue
+          }
+          yield chunk
+        }
       } catch (error) {
         throw fail(options.provider || DEFAULT_ROUTE, options.model, error)
       }
