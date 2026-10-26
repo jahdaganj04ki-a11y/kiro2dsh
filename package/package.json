@@ -1,0 +1,77 @@
+{
+  "name": "dsh-desktop-kiro",
+  "version": "0.1.0",
+  "description": "Use the Kiro IDE models (Claude, GPT, DeepSeek, Qwen, GLM, MiniMax) inside DSH Desktop with per-model endpoints, context, output and reasoning settings, and an OpenAI/Anthropic bridge for other agents.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./lib/*": "./lib/*",
+    "./scripts/*": "./scripts/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "scripts/install.mjs",
+    "install.ps1",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/",
+    "check": "node scripts/check-imports.mjs",
+    "install-plugin": "node scripts/install.mjs",
+    "pack-plugin": "node scripts/install.mjs --pack-only"
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh-plugin",
+    "kiro",
+    "kiro-ide",
+    "codewhisperer",
+    "aws-eventstream",
+    "llm-provider",
+    "openai-compatible",
+    "anthropic-compatible"
+  ],
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-settings-plugins"
+      ],
+      "platform": "web"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "3.18.5"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-client-connection": "^0.1.2-rc.1 || ^0.1.7-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-credentials": "^0.1.2-rc.1 || ^0.1.7-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-llm": "^0.1.2-rc.1 || ^0.1.7-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-settings": "^0.1.2-rc.1 || ^0.1.7-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.1 || ^0.2.1-rc.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-connection": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-settings": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "os": [
+    "win32",
+    "darwin",
+    "linux"
+  ]
+}
