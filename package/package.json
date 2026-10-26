@@ -25,7 +25,8 @@
     "test": "node --test \"test/*.test.js\"",
     "check": "node scripts/check-imports.mjs",
     "install-plugin": "node scripts/install.mjs",
-    "pack-plugin": "node scripts/install.mjs --pack-only"
+    "pack-plugin": "node scripts/install.mjs --pack-only",
+    "prepack": "node scripts/check-imports.mjs && node --test \"test/*.test.js\""
   },
   "license": "MIT",
   "keywords": [
@@ -67,7 +68,7 @@
     }
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "os": [
     "win32",

@@ -102,6 +102,9 @@ const authConfig = z.object({
   autoImport: z.boolean().default(true),
   refreshLeadingMs: z.number().step(1).min(0),
   preferredAccountId: z.string(),
+  // Only the local IDE import needs this: a profile under a different root (a
+  // roaming directory, another volume) is a settings change rather than a symlink.
+  homeDir: z.string(),
 })
 
 /** The plugin's configuration document. */
@@ -173,6 +176,7 @@ export async function apply(ctx, config) {
       repairToolCalls: profile.repairToolCalls !== false,
       refreshLeadingMs: auth().refreshLeadingMs,
       preferredAccountId: auth().preferredAccountId,
+      ...(auth().homeDir ? { homeDir: auth().homeDir } : {}),
       bridgeToken: tokenCache.value,
     }
   }

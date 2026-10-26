@@ -1,0 +1,10 @@
+# Build output: `npm run pack-plugin` writes the installable tarball here.
+dist/
+*.tgz
+
+# A checkout has no dependencies to install; if someone adds them, keep them out.
+node_modules/
+
+# Editor and tool state.
+.DS_Store
+*.log

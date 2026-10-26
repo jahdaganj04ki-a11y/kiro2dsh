@@ -20,7 +20,7 @@
  */
 
 import { execFile, spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, mkdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, mkdirSync, renameSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -71,19 +71,29 @@ async function main() {
   const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'))
   assertPluginPackage(manifest)
 
+  if (options.packOnly) {
+    // Packing is a legitimate end in itself: the tarball goes to DSH Desktop's own
+    // plugin UI, which needs no CLI at all.
+    await pack(manifest)
+    return
+  }
+
   const dsh = options.dsh ? resolve(options.dsh) : findDsh()
   if (!dsh) {
     console.error([
       'Could not find the `dsh` executable.',
       '',
-      `Install the plugin by hand with:`,
+      'Install the plugin by hand with:',
       `  dsh plugin --profile ${options.profile} add <path to the tarball below>`,
       '',
       'Or point this script at the executable: --dsh "C:\\Users\\you\\AppData\\Local\\Programs\\dsh-desktop\\resources\\bin\\dsh.cmd"',
     ].join('\n'))
     if (!options.uninstall) {
+      // Without the CLI this is all we can usefully do: hand over a ready package
+      // and the one command that installs it.
       const tarball = await pack(manifest)
       console.log(`\npacked: ${tarball}`)
+      console.log(`        dsh plugin --profile ${options.profile} add "${tarball}"`)
     }
     process.exit(3)
   }
@@ -96,7 +106,6 @@ async function main() {
   }
 
   const target = options.link ? `link:${packageRoot}` : await pack(manifest)
-  if (options.packOnly) return
 
   console.log(`installing ${target} into profile "${options.profile}"…`)
   const result = spawnSync(dsh, ['plugin', '--profile', options.profile, 'add', target], {
@@ -158,25 +167,50 @@ function assertPluginPackage(manifest) {
   }
 }
 
-/** `npm pack` into `dist/`, returning the absolute tarball path. */
+/**
+ * `npm pack` into `dist/`, returning the absolute tarball path.
+ *
+ * `npm pack` writes to the *current* directory unless told otherwise, and the
+ * profile installs a path — so the destination is passed explicitly, with a move as
+ * the fallback for npm releases that do not know the flag. Deciding by "whatever
+ * .tgz appeared" would pick up a stale package from an earlier run and install that.
+ */
 async function pack(manifest) {
   const dist = join(packageRoot, 'dist')
   mkdirSync(dist, { recursive: true })
-  const before = new Set(listTarballs(dist))
-  await run('npm', ['pack', '--packaging-strict', '--json'], { cwd: packageRoot, maxBuffer: 4 * 1024 * 1024 }).catch(async error => {
-    // Older npm releases reject the flag; retry once without it.
-    if (!/packaging-strict/iu.test(String(error?.stderr || error?.message))) throw error
-    return run('npm', ['pack', '--json'], { cwd: packageRoot, maxBuffer: 4 * 1024 * 1024 })
-  })
-  const created = listTarballs(dist).filter(name => !before.has(name))
-  const tarball = created[0] || listTarballs(dist).sort().at(-1)
+  const before = new Set([...listTarballs(dist), ...listTarballs(packageRoot)])
+  const packed = await run('npm', ['pack', '--packaging-strict', '--pack-destination', 'dist', '--json'], { cwd: packageRoot, maxBuffer: 4 * 1024 * 1024 })
+    .catch(async error => {
+      const text = `${error?.stderr || ''}${error?.message || ''}`
+      // Two flags may be unknown on an older npm: drop them and retry, once.
+      if (!/pack-destination|packaging-strict/iu.test(text)) throw error
+      return run('npm', ['pack', '--json'], { cwd: packageRoot, maxBuffer: 4 * 1024 * 1024 })
+        .then(result => ({ fallback: true, stdout: result.stdout }))
+        .catch(retry => {
+          if (!/pack-destination/iu.test(`${retry?.stderr || ''}${retry?.message || ''}`)) throw retry
+          return run('npm', ['pack'], { cwd: packageRoot, maxBuffer: 4 * 1024 * 1024 }).then(() => ({ fallback: true }))
+        })
+    })
+  // npm prints the filename it wrote; with --json that is a manifest, with plain
+  // output it is the path. Either way a freshly landed tarball is the real answer.
+  const claimed = String(packed?.stdout || '').match(/([\w.@-]+\.tgz)/u)?.[1]
+  const candidates = [
+    ...listTarballs(dist).filter(name => !before.has(name)).map(name => join(dist, name)),
+    ...listTarballs(packageRoot).filter(name => !before.has(name)).map(name => join(packageRoot, name)),
+  ]
+  let tarball = candidates.sort().at(-1) || (claimed ? [dist, packageRoot].map(dir => join(dir, claimed)).find(existsSync) : null)
   if (!tarball) {
     console.error('npm pack produced no tarball; run `npm pack` inside the package directory to see why')
     process.exit(2)
   }
-  const path = resolve(dist, tarball)
-  console.log(`packed ${basename(path)} (${(readFileSync(path).byteLength / 1024).toFixed(0)} kB)`)
-  return path
+  if (dirname(tarball) !== dist) {
+    // Keep the artefact where the docs say it is.
+    const moved = join(dist, basename(tarball))
+    renameSync(tarball, moved)
+    tarball = moved
+  }
+  console.log(`packed ${basename(tarball)} (${(readFileSync(tarball).byteLength / 1024).toFixed(0)} kB)`)
+  return resolve(tarball)
 }
 
 function listTarballs(dir) {
