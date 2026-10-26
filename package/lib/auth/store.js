@@ -19,7 +19,7 @@
 
 import { DEFAULT_REGION, REFRESH_LEAD_MS } from '../constants.js'
 import { ERROR_CODES, KiroError } from '../errors.js'
-import { redact } from '../util.js'
+import { redact, sha256 } from '../util.js'
 import { needsRefresh, refreshKiroToken } from './token-refresh.js'
 
 /** Record schema version; bump it and migrate in `read`. */
@@ -27,13 +27,20 @@ export const STORE_VERSION = 1
 
 const SECRET_FIELDS = ['accessToken', 'refreshToken', 'clientSecret', 'apiKey']
 
-/** One stable id for an account, derived from the credential rather than a counter. */
+/**
+ * One stable id for an account, derived from its credential rather than a counter,
+ * so re-importing the same token finds the same record.
+ *
+ * The id is a digest, not the credential's tail: ids appear in panel rows, log
+ * lines and bridge errors, and a hex-encoded suffix of the token would be readable
+ * straight back into the secret.
+ */
 export function accountId(account) {
   const seed = account?.apiKey
     || account?.refreshToken
     || account?.accessToken
     || `${account?.authMethod || 'kiro'}:${account?.email || 'anonymous'}`
-  return `kiro-${Buffer.from(String(seed).slice(-24)).toString('hex').slice(0, 16)}`
+  return `kiro-${sha256(String(seed)).slice(0, 16)}`
 }
 
 /** Blank pool. */
@@ -212,7 +219,10 @@ export function createAccountStore(options) {
     if (active.authMethod === 'api_key' && !active.accessToken && !active.apiKey) {
       throw new KiroError('the API key account has no stored key', ERROR_CODES.invalidCredential)
     }
-    if (!active.accessToken) throw new KiroError('this Kiro account has no access token; sign in again', ERROR_CODES.auth)
+    // A stored API key *is* the bearer token, so that method needs no access token.
+    if (!active.accessToken && active.authMethod !== 'api_key') {
+      throw new KiroError('this Kiro account has no access token; sign in again', ERROR_CODES.auth)
+    }
     if (!needsRefresh(active, now())) return { account: active, store }
 
     // Collapse concurrent refreshes for one account into a single rotation.

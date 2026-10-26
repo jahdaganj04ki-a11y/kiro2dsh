@@ -225,3 +225,29 @@ export async function drain(iterable) {
   for await (const value of iterable) out.push(value)
   return out
 }
+
+/**
+ * A structurally valid (unsigned) JWT with the given claims.
+ *
+ * The plugin reads `email`/`exp` out of the access token for display and expiry
+ * hints, so a fake credential has to be decodable or those paths never run.
+ */
+export function fakeJwt(claims = {}, signature = 'sig') {
+  const encode = value => Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
+  return `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({ sub: 'kiro-user', ...claims })}.${encode(signature)}`
+}
+
+/** A fetch double that records `{url, init}` and answers from a queue. */
+export function tokenFetch(replies) {
+  const calls = []
+  let index = 0
+  const fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init, body: init.body == null ? undefined : String(init.body) })
+    const reply = typeof replies === 'function' ? replies({ url: String(url), init, index: calls.length - 1 }) : replies[Math.min(index++, replies.length - 1)]
+    if (reply instanceof Response) return reply
+    if (typeof reply === 'function') return await reply({ url, init })
+    const { status = 200, body = {}, headers = { 'Content-Type': 'application/json' } } = reply || {}
+    return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers })
+  }
+  return { fetch, calls }
+}

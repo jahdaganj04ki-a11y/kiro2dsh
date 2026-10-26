@@ -111,7 +111,9 @@ export function staticSession(input = {}, onNotify = () => {}) {
     notify: notice => onNotify(notice),
     prompt: async request => {
       const value = answers[request.field]
-      if (value === undefined || value === null || value === '') throw new AwaitingInput(request)
+      const missing = value === undefined || value === null || value === ''
+      if (missing && request.required === false) return ''
+      if (missing) throw new AwaitingInput(request)
       return typeof value === 'string' ? value.trim() : value
     },
   }
@@ -150,13 +152,18 @@ export async function runSignIn(method, options) {
     if (value === undefined || value === null || value === '') throw new KiroError(`${message} is required`, ERROR_CODES.rejected)
     return value
   }
+  /** A question the flow can live without: an empty answer means "not applicable". */
+  const maybeAnswer = async (field, message, kind = 'text') => {
+    const value = await session.prompt({ field, kind, message, required: false })
+    return value === undefined || value === null ? '' : String(value).trim()
+  }
   const commit = async account => {
     const built = buildAccount({ ...account, authMethod: account.authMethod || normalized, region: account.region || state.region || settings.region })
     // `upsert` assigns the id, so activation has to read it back from there
     // rather than assume a flow handed one over.
     const { id } = await options.store.upsert(built)
     if (options.activate !== false) await options.store.setActive(id)
-    log?.info?.(`kiro: signed in via %s; account=%s`, normalized, id)
+    log?.info?.(`kiro: signed in via ${normalized}; account=${id}`)
     return { status: 'authorized', account: { ...built, id }, state: null }
   }
 
@@ -222,7 +229,10 @@ export async function runSignIn(method, options) {
 
     case 'import': {
       const raw = await answer('refreshToken', 'Paste the Kiro refresh token (aor… for a social login, aot… for a Builder ID / IdP token)')
-      const clientId = settings.clientId || (await session.prompt({ field: 'clientId', kind: 'text', message: 'Client ID — leave blank unless this token came from Kiro\'s OIDC client' })) || ''
+      // A `aor…` token is Kiro's own social credential and rotates without a client
+      // registration; asking for one would be a dead end for most people importing.
+      const social = raw.startsWith('aor')
+      const clientId = settings.clientId || (social ? '' : await maybeAnswer('clientId', 'Client ID - leave blank unless this token came from Kiro\'s OIDC client'))
       const clientSecret = settings.clientSecret || (clientId ? await answer('clientSecret', 'Client secret for that client ID') : '')
       const account = await importRefreshToken({
         refreshToken: raw,
@@ -237,7 +247,12 @@ export async function runSignIn(method, options) {
 
     case 'auto-import': {
       session.notify({ message: 'Looking for a Kiro or AWS SSO session on this machine…' })
-      const discovered = await discoverLocalCredentials({ ...transport })
+      // A non-standard install location is a setting rather than a code change:
+      // the search roots below `home` are fixed by the IDE, not by us.
+      const discovered = await discoverLocalCredentials({
+        ...transport,
+        ...(settings.homeDir ? { home: settings.homeDir } : {}),
+      })
       if (!discovered.found) {
         throw new KiroError(
           `${discovered.message || 'No local Kiro credential was found.'} Searched: ${(discovered.searched || []).join(', ')}`,
@@ -288,6 +303,10 @@ async function runDeviceCode(authMethod, ctx) {
       clientId: device.clientId,
       clientSecret: device.clientSecret,
       region: device.region,
+      // `startDeviceAuthorization` picks the effective start URL (the personal
+      // default when nobody typed one); the account record should say which one was
+      // used, or a later refresh cannot tell an organization login from a personal one.
+      startUrl: device.startUrl,
       expiresInSeconds: device.expiresInSeconds,
       intervalSeconds: device.intervalSeconds,
       defaultProfileArn: device.defaultProfileArn,
@@ -354,33 +373,49 @@ export function createSignInCoordinator(deps) {
   const ttl = Number.isFinite(deps.ttlMs) && deps.ttlMs > 0 ? deps.ttlMs : 10 * 60_000
 
   const round = async input => {
-    const method = normalizeMethod(input?.method)
+    let method
+    try {
+      method = normalizeMethod(input?.method)
+    } catch (error) {
+      return { status: 'failed', error: { message: error.message, code: error.code || ERROR_CODES.rejected }, notices: [] }
+    }
     const id = typeof input?.stateId === 'string' && input.stateId ? input.stateId : `kiro-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
     const existing = rounds.get(id)
     const merged = { ...(existing?.answers || {}), ...(input?.input || {}) }
     if (existing?.timer) clearTimeout(existing.timer)
     const notices = []
+    /** Keep a round open so the next request can resume it, and let it die on its own after `ttl`. */
+    const park = request => {
+      const previous = rounds.get(id)
+      if (previous?.timer) clearTimeout(previous.timer)
+      const timer = setTimeout(() => rounds.delete(id), ttl)
+      timer.unref?.()
+      rounds.set(id, { state: session.state, answers: merged, request, timer })
+    }
     const session = {
       method,
       notify: notice => notices.push({ ...notice, at: Date.now() }),
       prompt: async request => {
         const value = merged[request.field]
         if (value === undefined || value === null || value === '') {
-          rounds.set(id, {
-            state: session.state || {},
-            answers: merged,
-            request,
-            timer: setTimeout(() => rounds.delete(id), ttl),
-          })
-          rounds.get(id).timer.unref?.()
+          if (request.required === false) return ''
+          park(request)
           throw new AwaitingInput(request)
         }
         delete merged[request.field]
         return typeof value === 'string' ? value.trim() : value
       },
       ...(input?.signal ? { signal: input.signal } : {}),
+      // The flow's own state object, reused between rounds: a device code and its
+      // client registration must survive the round trip or every poll re-issues one.
       state: existing?.state || {},
     }
+    const parked = () => ({
+      status: 'awaiting_input',
+      stateId: id,
+      notices,
+      ...(session.state.userCode ? { userCode: session.state.userCode, url: session.state.verificationUri } : {}),
+    })
     try {
       const result = await runSignIn(method, {
         session,
@@ -390,19 +425,18 @@ export function createSignInCoordinator(deps) {
         ...(deps.fetch ? { fetch: deps.fetch } : {}),
         ...(deps.log ? { log: deps.log } : {}),
       })
+      if (result?.status === 'awaiting_input') {
+        // `runSignIn` mutated its own copy of the state while polling; that copy is
+        // the only place the device code lives, so the round is parked with it.
+        Object.assign(session.state, result.state || {})
+        park(result.prompt)
+        return { ...parked(), prompt: result.prompt }
+      }
       rounds.delete(id)
       return { ...result, stateId: null, notices, ...(result.state ? { state: result.state } : {}) }
     } catch (error) {
       if (error instanceof AwaitingInput) {
-        const parked = rounds.get(id)
-        if (parked) parked.state = session.state
-        return {
-          status: 'awaiting_input',
-          stateId: id,
-          prompt: error.request,
-          notices,
-          ...(session.state.userCode ? { userCode: session.state.userCode, url: session.state.verificationUri } : {}),
-        }
+        return { ...parked(), prompt: error.request }
       }
       rounds.delete(id)
       if (error instanceof Declined) return { status: 'declined', notices }

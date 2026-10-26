@@ -226,13 +226,13 @@ export function classifyRefreshError(body, status) {
   }
   const code = String(parsed?.error?.code || parsed?.error || parsed?.error_code || parsed?.errorDescription || '').toLowerCase()
   const description = String(parsed?.error_description || parsed?.message || body || '')
-  const combined = `${code} ${description}`.toLowerCase()
-  const permanent = [
-    'refresh_token_expired',
-    'refresh_token_reused',
-    'refresh_token_invalidated',
-    'invalid_grant',
-    'invalid_grant_error',
-  ].some(marker => combined.includes(marker))
+  // AWS SSO spells these `RefreshTokenExpired`, the OIDC hosts spell them
+  // `refresh_token_expired`, and the SDK exception name may appear as
+  // `InvalidGrantException`. Separators are removed so one list covers all three;
+  // getting this wrong either retries a dead token forever or asks for a sign-in
+  // that was never needed.
+  const combined = `${code} ${description}`.toLowerCase().replace(/[^a-z0-9]/gu, '')
+  const permanent = ['refreshtokenexpired', 'refreshtokenreused', 'refreshtokeninvalidated', 'invalidgrant']
+    .some(marker => combined.includes(marker))
   return { code: code || undefined, description, permanent, status }
 }
