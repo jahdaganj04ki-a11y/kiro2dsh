@@ -39,20 +39,25 @@ export class ChunkBuilder {
     this.chunks = []
     this.index = 0
     this.open = null
-    this.text = ''
-    this.reasoning = ''
     this.closed = []
     this.finished = false
     this.usageSent = false
+    // The accumulators are private on purpose: `this.text` would shadow the
+    // `text()` method, and a class body reads as if it could not.
+    this.#text = ''
+    this.#reasoning = ''
   }
+
+  #text = ''
+  #reasoning = ''
 
   #open(kind) {
     if (this.open?.kind === kind) return this.open.index
     this.#close()
     const index = this.index++
     this.open = { kind, index }
-    if (kind === 'text') this.text = ''
-    if (kind === 'reasoning') this.reasoning = ''
+    if (kind === 'text') this.#text = ''
+    if (kind === 'reasoning') this.#reasoning = ''
     this.chunks.push({ type: 'block-start', index, blockType: kind })
     return index
   }
@@ -61,31 +66,34 @@ export class ChunkBuilder {
     if (!this.open) return
     const { kind, index } = this.open
     const block = kind === 'text'
-      ? { type: 'text', text: this.text }
-      : { type: 'reasoning', text: this.reasoning }
+      ? { type: 'text', text: this.#text }
+      : { type: 'reasoning', text: this.#reasoning }
     this.chunks.push({ type: 'block-end', index, block })
     this.closed.push(block)
     this.open = null
   }
 
+  /** @param {string} text one delta of visible output. */
   text(text) {
-    if (!text) return this
+    if (!text || this.finished) return this
     const index = this.#open('text')
-    this.text += text
+    this.#text += text
     this.chunks.push({ type: 'text-delta', index, text })
     return this
   }
 
+  /** @param {string} text one delta of extended thinking, a channel the caller never sees as output. */
   reasoning(text) {
-    if (!text) return this
+    if (!text || this.finished) return this
     const index = this.#open('reasoning')
-    this.reasoning += text
+    this.#reasoning += text
     this.chunks.push({ type: 'reasoning-delta', index, text })
     return this
   }
 
   /** Tool calls are complete when Kiro is done fragmenting them, so they get their own block. */
   toolCall(call) {
+    if (this.finished) return this
     this.#close()
     const index = this.index++
     const block = { type: 'tool-call', id: call.id, name: call.name, arguments: call.arguments }
@@ -103,7 +111,7 @@ export class ChunkBuilder {
   }
 
   usage(usage) {
-    if (!usage || this.usageSent) return this
+    if (!usage || this.usageSent || this.finished) return this
     this.#close()
     this.usageSent = true
     this.chunks.push({ type: 'usage', usage })
@@ -222,6 +230,8 @@ export function createTurnRunner(deps) {
           tools: options.tools,
           maxTokens: options.maxTokens,
           temperature: options.temperature,
+          ...(options.topP === undefined ? {} : { topP: options.topP }),
+          ...(options.stop === undefined ? {} : { stop: options.stop }),
           reasoningEffort: options.reasoningEffort,
           conversationId: conversationIdFor(options, account),
           credentials,

@@ -78,6 +78,9 @@ export const TAG_BUDGETS = Object.freeze({
   max: 32000,
 })
 
+/** Reasoning tiers from cheapest to strongest; used to clamp an unsupported request. */
+export const EFFORT_LADDER = Object.freeze(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+
 /** Human labels for effort ids, used by both the harness picker and the panel. */
 export const EFFORT_LABELS = Object.freeze({
   minimal: 'Minimal',
@@ -214,8 +217,11 @@ export const SEED_MODELS = Object.freeze([
     vision: false,
     tools: true,
     rateMultiplier: 0.3,
-    reasoning: 'none',
-    efforts: false,
+    // No `additionalModelRequestFields` schema for this family, so reasoning is
+    // switched on with Kiro's `<thinking_mode>` prompt tag, exactly as the
+    // reference translator does for every model without a native effort field.
+    reasoning: 'tag',
+    efforts: ['minimal', 'low', 'medium', 'high'],
   },
   {
     id: 'qwen3-coder-next',
@@ -224,21 +230,12 @@ export const SEED_MODELS = Object.freeze([
     maxOutput: 32_000,
     vision: false,
     rateMultiplier: 0.3,
-    reasoning: 'none',
-    efforts: false,
+    reasoning: 'tag',
+    efforts: ['minimal', 'low', 'medium', 'high'],
   },
   {
     id: 'glm-5',
     name: 'GLM 5',
-    context: 200_000,
-    maxOutput: 32_000,
-    vision: false,
-    rateMultiplier: 0.3,
-    efforts: ['minimal', 'low', 'medium', 'high'],
-  },
-  {
-    id: 'glm-5.2',
-    name: 'GLM 5.2',
     context: 200_000,
     maxOutput: 32_000,
     vision: false,
@@ -261,8 +258,8 @@ export const SEED_MODELS = Object.freeze([
     maxOutput: 32_000,
     vision: false,
     rateMultiplier: 0.2,
-    reasoning: 'none',
-    efforts: false,
+    reasoning: 'tag',
+    efforts: ['minimal', 'low', 'medium', 'high'],
   },
   {
     id: 'kimi-k3',
@@ -531,7 +528,18 @@ export function resolveMaxTokens(model, requested) {
 export function effortWireValue(model, effort) {
   if (!effort || model.efforts === false) return null
   const allowed = model.efforts || []
-  if (!allowed.includes(effort)) return null
+  if (!allowed.includes(effort)) {
+    // A tier the model does not list is answered with the closest one below it:
+    // `xhigh` on a 4.6 Claude means "think hard", and replying with no thinking at
+    // all would silently change the request. Kiro rejects an unknown tier value, so
+    // the value sent must come from this model's own list.
+    const rank = EFFORT_LADDER.indexOf(effort)
+    if (rank < 0) return null
+    for (let i = Math.min(rank, EFFORT_LADDER.length - 1); i >= 0; i--) {
+      if (allowed.includes(EFFORT_LADDER[i])) return effortWireValue(model, EFFORT_LADDER[i])
+    }
+    return null
+  }
   if (model.reasoning === 'output_config') return effort === 'max' ? 'max' : effort
   if (model.reasoning === 'reasoning') return effort === 'max' ? 'xhigh' : effort
   if (model.reasoning === 'tag') return TAG_BUDGETS[effort] ?? THINKING_BUDGET_DEFAULT

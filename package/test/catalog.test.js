@@ -26,6 +26,7 @@ import {
   mergeLiveCatalog,
   normalizeModel,
   reasoningInfo,
+  TAG_BUDGETS,
   reasoningPath,
   resolveMaxTokens,
 } from '../lib/catalog.js'
@@ -34,7 +35,7 @@ import { DEFAULT_MAX_OUTPUT, MAX_OUTPUT_CAP, THINKING_BUDGET_MAX, THINKING_BUDGE
 const catalog = buildCatalog({})
 
 test('the seed table is populated and unique', () => {
-  assert.ok(SEED_MODELS.length >= 20, `expected a catalog of real Kiro models, got ${SEED_MODELS.length}`)
+  assert.ok(SEED_MODELS.length >= 19, `expected a catalog of real Kiro models, got ${SEED_MODELS.length}`)
   const ids = new Set(SEED_MODELS.map(model => model.id))
   assert.equal(ids.size, SEED_MODELS.length, 'seed ids must be unique')
   for (const model of SEED_MODELS) {
@@ -53,10 +54,32 @@ test('each family gets the thinking carrier Kiro actually accepts', () => {
   // 4.6+ moved to a wire field, and the legacy date-suffixed spelling kept the tag.
   assert.equal(reasoningPath('claude-opus-4.6'), 'output_config')
   assert.equal(reasoningPath('claude-opus-4.20250805'), 'tag')
-  // The table decides per model; the fallback is the tag path, which is the carrier
-  // a family that documents no reasoning field simply ignores.
+  // A family that documents no reasoning field still gets thinking, through the
+  // prompt tag — that is how Kiro itself turns it on for DeepSeek or MiniMax.
   assert.equal(reasoningPath('deepseek-3.2'), 'tag')
-  assert.equal(findModel(catalog, 'deepseek-3.2').reasoning, 'none')
+  assert.equal(findModel(catalog, 'deepseek-3.2').reasoning, 'tag')
+  assert.equal(findModel(catalog, 'minimax-m2.1').reasoning, 'tag')
+  // The router model has no thinking control of its own, so nothing is sent.
+  assert.equal(findModel(catalog, 'auto').reasoning, 'none')
+  assert.equal(effortWireValue(findModel(catalog, 'auto'), 'high'), null)
+})
+
+test('an unsupported tier is clamped down, never dropped or invented', () => {
+  // xhigh is a 4.7+ tier: asking for it on a 4.6 model means "think harder", so the
+  // strongest tier that model accepts is sent instead of no thinking at all.
+  const sonnet46 = findModel(catalog, 'claude-sonnet-4.6')
+  assert.deepEqual([...sonnet46.efforts], ['low', 'medium', 'high', 'max'])
+  assert.equal(effortWireValue(sonnet46, 'xhigh'), 'high')
+  const opus5 = findModel(catalog, 'claude-opus-5.5')
+  assert.equal(effortWireValue(opus5, 'xhigh'), 'xhigh')
+  assert.equal(effortWireValue(opus5, 'max'), 'max')
+  // GPT has no `max` tier on the wire; the reference translator maps it to xhigh.
+  const gpt = findModel(catalog, 'gpt-5.6-sol')
+  assert.equal(effortWireValue(gpt, 'max'), 'xhigh')
+  assert.equal(effortWireValue(gpt, 'minimal'), null)
+  // A tag-path model gets a budget; the clamp lands on the budget list it declares.
+  const deepseek = findModel(catalog, 'deepseek-3.2')
+  assert.equal(effortWireValue(deepseek, 'xhigh'), TAG_BUDGETS.high)
 })
 
 test('effort wire values are per family', () => {
