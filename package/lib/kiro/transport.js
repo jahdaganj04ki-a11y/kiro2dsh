@@ -146,14 +146,46 @@ export function buildAuthHeaders(credentials) {
   return headers
 }
 
+/**
+ * Header names the data plane reads as a client fingerprint.
+ *
+ * The harness mandates its own attribution `user-agent` on every provider request,
+ * and that is exactly what makes Kiro answer "usable in the IDE only": the gateway
+ * parses this pair before it looks at the payload, and a generic or mismatched value
+ * is rejected. So injected headers may add anything *except* these, which the
+ * transport owns. `Content-Type` belongs here too, because a body the runtime cannot
+ * parse is refused with an error that names nothing.
+ */
+const FINGERPRINT_HEADERS = Object.freeze(new Set([
+  'user-agent',
+  'x-amz-user-agent',
+  'x-amzn-kiro-agent-mode',
+  'x-amzn-codewhisperer-optout',
+  'amz-sdk-request',
+  'amz-sdk-invocation-id',
+  'accept',
+  'content-type',
+]))
+
+/** Drop the protected names from a caller-supplied header record. */
+function withoutFingerprint(headers) {
+  if (!headers) return null
+  const kept = {}
+  for (const [name, value] of Object.entries(headers)) {
+    if (FINGERPRINT_HEADERS.has(String(name).toLowerCase())) continue
+    kept[name] = value
+  }
+  return Object.keys(kept).length > 0 ? kept : null
+}
+
 /** Compose the full header set for one request. */
 export function buildHeaders(credentials, options = {}) {
   const url = options.url || ''
   const headers = mergeHeaders(
     KIRO_FIXED_HEADERS,
+    withoutFingerprint(options.extraHeaders),
     buildFingerprintHeaders(credentials, options),
     buildAuthHeaders(credentials),
-    options.extraHeaders,
   )
   // The legacy CodeWhisperer host is the only surface using the RPC target.
   if (url.includes('://codewhisperer.')) headers['x-amz-target'] = CODEWHISPERER_TARGET

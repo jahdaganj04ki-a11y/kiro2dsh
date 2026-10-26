@@ -350,3 +350,33 @@ function fakeFetchOnce(replies) {
     },
   }
 }
+
+test('a caller-injected fingerprint header cannot displace the pair the gateway reads', () => {
+  const credentials = { ...account(), accessToken: 'at-token' }
+  // This is what the harness mandates on every provider request, and it is the
+  // single most common reason a non-IDE client is refused: the merge is
+  // case-insensitive, so a plain override would rename `User-Agent` and win.
+  const extraHeaders = {
+    'user-agent': 'harness-agent/1.0',
+    'x-amz-user-agent': 'harness-agent/1.0',
+    accept: 'text/event-stream',
+    'content-type': 'text/plain',
+    'amz-sdk-invocation-id': 'not-a-uuid',
+    'x-team-header': 'kept',
+  }
+  const headers = buildHeaders(credentials, { url: 'https://runtime.us-east-1.kiro.dev/generateAssistantResponse', extraHeaders })
+  assert.match(headers['User-Agent'], /^aws-sdk-js\//u, 'the SDK-shaped fingerprint stays intact')
+  assert.match(headers['User-Agent'], /KiroIDE-/u)
+  assert.doesNotMatch(JSON.stringify(headers), /harness-agent/u, 'and is not present under another spelling either')
+  assert.match(headers['x-amz-user-agent'], /^aws-sdk-js\//u)
+  assert.equal(headers.Accept, EVENTSTREAM_ACCEPT)
+  assert.match(headers['amz-sdk-invocation-id'], /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u)
+  assert.equal(headers['x-amzn-codewhisperer-optout'], 'true')
+  // Everything a caller adds for its own reasons still passes through.
+  assert.equal(headers['x-team-header'], 'kept')
+  // A JSON surface still gets its media type, because the fingerprint rule is about
+  // the *pair*, not about pretending every call is a stream.
+  const json = buildHeaders(credentials, { url: 'https://q.us-east-1.amazonaws.com/ListAvailableModels', accept: 'application/json', extraHeaders })
+  assert.equal(json.Accept, 'application/json')
+  assert.match(json['User-Agent'], /KiroIDE-/u)
+})

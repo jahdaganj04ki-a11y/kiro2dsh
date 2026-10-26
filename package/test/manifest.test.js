@@ -98,9 +98,13 @@ test('every settings key in the README is a key in the schema', () => {
   const profilesBlock = source.slice(source.indexOf('const providerProfile = z.object('), source.indexOf('const bridgeConfig = z.object('))
   const bridgeBlock = source.slice(source.indexOf('const bridgeConfig = z.object('), source.indexOf('const authConfig = z.object('))
   const authBlock = source.slice(source.indexOf('const authConfig = z.object('), source.indexOf('/** The plugin\u0027s configuration document. */'))
-  const profileKeys = new Set([...profilesBlock.matchAll(/^  ([a-zA-Z][a-zA-Z0-9]*): z\./gmu)].map(match => match[1]))
-  const bridgeKeys = new Set([...bridgeBlock.matchAll(/^  ([a-zA-Z][a-zA-Z0-9]*): z\./gmu)].map(match => match[1]))
-  const authKeys = new Set([...authBlock.matchAll(/^  ([a-zA-Z][a-zA-Z0-9]*): z\./gmu)].map(match => match[1]))
+  // A field is `key: z.string()` or `key: SomeSchema` - the harness' own schemas are
+  // reused as often as schemastery's builders, and the README has to cover both.
+  const fields = block => new Set([...block.matchAll(/^  ([a-zA-Z][a-zA-Z0-9]*): [^\n]*,$/gmu)].map(match => match[1]))
+  const profileKeys = fields(profilesBlock)
+  const bridgeKeys = fields(bridgeBlock)
+  const authKeys = fields(authBlock)
+  assert.ok(profileKeys.has('retryPolicy'), 'the reused harness schema counts as a declared field')
 
   // Only the settings section, but any cell in it: a row that documents two keys
   // side by side is still a promise about both of them.

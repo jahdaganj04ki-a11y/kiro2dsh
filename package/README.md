@@ -65,6 +65,33 @@ moves the turn to the next account, and a `429` moves immediately. A refresh tha
 cannot recover is reported as `KIRO_REFRESH_EXPIRED` — "sign in again", not a stack
 trace. A `400` moves to nobody: a body Kiro rejected is rejected for every account.
 
+## Why the models answer here and not elsewhere
+
+Kiro's data plane is not a public endpoint, and it is not guarded only by the token:
+the runtime checks that the request is shaped like the IDE's. Every turn therefore
+carries the pair the service expects — a `User-Agent` of `AWS-SDK-JS/… kiro-ide/…`
+plus `KiroIDE-<version>-<machine>`, the matching `x-amz-user-agent`, an `Accept` of
+`application/vnd.amazon.eventstream`, `x-amzn-codewhisperer-optout: true`, a
+`x-amzn-kiro-agent-mode` matching the model's agent mode, and a per-call
+`amz-sdk-invocation-id` with an attempt counter. `Accept: text/event-stream` — what an
+OpenAI client would send — gets a 406; a bearer token without the profile ARN the
+account owns gets a 403; a `modelId` with an image block on a text-only model gets an
+"invalid model id" that names nothing useful. Those four rejections are most of what
+"the models only work inside Kiro" actually is, and this plugin handles each one per
+model rather than globally.
+
+`providers.kiro.headers` cannot replace that pair — `user-agent`, `accept`,
+`content-type` and the `amz-sdk-*` markers are dropped from injected headers, because
+the harness' own attribution `user-agent` arriving here is exactly how a working
+install turns into "Kiro models only work in Kiro". Anything else you add passes
+through.
+
+The response side is the same story: Kiro answers in the binary AWS eventstream
+framing (length-prefixed headers, CRC32 checksums), not SSE. `lib/kiro/eventstream.js`
+decodes it, and a frame that stops short of its declared length is reported as a
+truncated stream instead of being skipped — skipping is what makes a partial answer
+look like a finished one.
+
 ## Models
 
 The seed table is what ships; `GET /v1/models` and the Models page read the same
@@ -126,7 +153,7 @@ they actually change:
 | `providers.kiro.baseUrl` | `https://runtime.us-east-1.kiro.dev` | override `generateAssistantResponse`'s host |
 | `providers.kiro.surfaces` | `q`, `codewhisperer` | which endpoint families to walk, in order |
 | `providers.kiro.apiKeyEnv` | — | credential ref holding a Kiro API key for this route |
-| `providers.kiro.headers` | — | extra headers on every request to this route |
+| `providers.kiro.headers` | — | extra headers on every request to this route, except the ones Kiro reads as a client fingerprint (see below) |
 | `providers.kiro.models` | — | declare the route's models by hand; replaces the seed table |
 | `providers.kiro.modelOverrides` | — | correct one model's `contextWindow`, `maxTokens`, `vision`, `reasoning`, … |
 | `providers.kiro.defaultContextWindow` | 200 000 | what a hand-declared model inherits for its context |
@@ -135,6 +162,7 @@ they actually change:
 | `providers.kiro.firstChunkTimeoutMs` | 60 000 | time to the first eventstream frame |
 | `providers.kiro.streamIdleTimeoutMs` | 120 000 | how long a silent stream may stay open |
 | `providers.kiro.rateLimitRetries` | 1 | in-request retries on `429` (0 disables them) |
+| `providers.kiro.retryPolicy` | — | the harness retry policy for this route (`{ mode, maxRetries, retryableCodes, backoff }`), validated by the harness' own schema |
 | `providers.kiro.accountFailover` | 2 | how many accounts one turn may walk |
 | `providers.kiro.repairToolCalls` | true | drop/relabel tool calls Kiro would reject |
 | `bridge.enable` | false | serve `/v1/*` on loopback |
@@ -207,10 +235,18 @@ account list (**Remove**) if you want the tokens gone.
 
 ```bash
 cd package
+npm install              # optional: brings the harness packages so test/integration.test.js runs
 npm test                 # the whole suite: no network, no DSH install needed
 npm run check            # import-graph guard: the harness is only touched in index.js and lib/adapter.js
 npm run pack-plugin      # dist/dsh-desktop-kiro-<version>.tgz
 ```
+
+`test/integration.test.js` is the one file that imports `index.js`, and it needs the
+harness packages for that; without them it reports itself skipped and the rest of the
+suite is unaffected. With them installed it drives the plugin through the real
+`@deepseek-ai/dsh-llm` service classes — the adapter base class, the credential record
+key, `normalizeModelInfo` on every advertised model, the panel routes, and a turn and a
+bridge request over a socket.
 
 `prepack` runs both checks, so a tarball that installs was a tarball that tested.
 `npm pack --ignore-scripts` skips them if you are in a hurry and know why. The suite

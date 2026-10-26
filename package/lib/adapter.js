@@ -83,7 +83,7 @@ export function toHarnessFailureCode(code) {
  * @property {number} [connectTimeoutMs]
  * @property {number} [firstChunkTimeoutMs]
  * @property {number} [streamIdleTimeoutMs]
- * @property {object} [retryPolicy] harness retry policy for this route
+ * @property {object} [retryPolicy] harness retry policy for this route (`{ mode, maxRetries, retryableCodes, backoff })
  */
 
 /**
@@ -234,7 +234,18 @@ export function createKiroAdapter(deps) {
     }
   }
 
-  const adapter = buildAdapter({ adapterBase: deps.LlmAdapter, LlmError: deps.LlmError, log: deps.log, modelsFor, selectableModels, describeModel, runner, settingsFor })
+  const adapter = buildAdapter({
+    adapterBase: deps.LlmAdapter,
+    LlmError: deps.LlmError,
+    RetryPolicySchema: deps.RetryPolicySchema,
+    log: deps.log,
+    modelsFor,
+    selectableModels,
+    describeModel,
+    runner,
+    settingsFor,
+    profileFor,
+  })
 
   return { adapter, runner, modelsFor, selectableModels, describeModel, refreshCatalog, catalog: catalogFor, unavailable: () => [...unavailable], toHarnessFailureCode }
 }
@@ -288,18 +299,46 @@ export function modelInfo(route, modelId, model, profile) {
 
 /** Assemble the adapter object, extending the harness base class when present. */
 function buildAdapter(harness) {
-  const base = harness.adapterBase ? new harness.adapterBase() : {}
+  // The base class is a bag of defaults (no constructor state), so the surface is
+  // built on its prototype rather than copying an instance: the service and any
+  // consumer can then treat this as a real `LlmAdapter`, and the methods the plugin
+  // does not override - `imageRequestTarget`, `providerRetryPolicy` for routes that
+  // declare nothing - keep the behaviour the harness documents.
+  const base = harness.adapterBase?.prototype ? Object.create(harness.adapterBase.prototype) : {}
   const fail = (route, modelId, error) => {
     const kiro = asKiroError(error)
     const message = `kiro: model "${modelId}" on route "${route}" failed: ${kiro.message}`
     if (harness.LlmError) return new harness.LlmError(message, toHarnessFailureCode(kiro.code))
     return Object.assign(new Error(message), { code: toHarnessFailureCode(kiro.code), cause: kiro })
   }
-  const surface = {
-    ...base,
+  const surface = Object.assign(base, {
     providerInfo(provider) {
       const profile = harness.settingsFor?.(provider) || {}
       return { id: provider, name: profile.displayName || 'Kiro' }
+    },
+    /**
+     * The route's retry policy, as configured.
+     *
+     * The harness decides *which* failures to retry from `finish.failure.code`, and
+     * its default set (`RATE_LIMIT`, `SERVER`, `TIMEOUT`, `TRANSPORT`,
+     * `EMPTY_RESPONSE`) is what Kiro wants for almost every account. A route that
+     * backs off harder - a shared builder id, a proxy that resets sockets - declares
+     * `retryPolicy` in its profile and this hands it through verbatim. A malformed
+     * value is reported and ignored rather than thrown, because the service calls
+     * this on every attempt and an invalid policy must not end a conversation.
+     */
+    providerRetryPolicy(provider) {
+      const policy = harness.profileFor?.(provider)?.retryPolicy
+      if (!policy || typeof policy !== 'object') return undefined
+      const validate = harness.RetryPolicySchema?.['~standard']?.validate
+      if (typeof validate === 'function') {
+        const issues = validate(policy)?.issues
+        if (issues?.length > 0) {
+          harness.log?.warn?.(`kiro: ignoring an invalid retry policy for "${provider}": ${issues.map(issue => `${issue.path?.join('.') || 'policy'} ${issue.message}`).join('; ')}`)
+          return undefined
+        }
+      }
+      return policy
     },
     listModels(provider) {
       return Promise.resolve(harness.selectableModels(provider).map(model => ({
@@ -321,7 +360,7 @@ function buildAdapter(harness) {
       }
     },
 
-  }
+  })
   /**
    * The one entry point the loop calls.
    *

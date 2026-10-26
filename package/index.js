@@ -25,7 +25,7 @@
 
 import z from '@deepseek-ai/schemastery'
 import { credentialKey, credentialRef, isCredentialRefName } from '@deepseek-ai/dsh-credentials'
-import { LlmAdapter, LlmError, attributionHeaders } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, LlmError, RetryPolicySchema, attributionHeaders } from '@deepseek-ai/dsh-llm'
 
 import { createAccountStore } from './lib/auth/store.js'
 import { authMethodEntries, createSignInCoordinator, runSignIn } from './lib/auth/signin.js'
@@ -64,6 +64,9 @@ const modelFields = {
 /** One model an operator declares by hand, when Kiro has added one since this table. */
 const declaredModel = z.object({ id: z.string().required(), ...modelFields })
 
+/** `{ [modelId]: fields }`, which is what a dict of a fixed field set means here. */
+const modelOverrideMap = z.dict(z.object(modelFields))
+
 /**
  * One Kiro route.
  *
@@ -80,14 +83,21 @@ const providerProfile = z.object({
   apiKeyEnv: z.string().role('credential-ref'),
   headers: z.dict(z.string()),
   models: z.array(declaredModel),
-  modelOverrides: z.dict(modelFields),
+  // `z.dict` takes one value schema, so the per-model field set has to be wrapped:
+  // passing the bare object throws while the module is still loading.
+  modelOverrides: modelOverrideMap,
   defaultContextWindow: z.number().step(1).min(1).default(DEFAULT_CONTEXT_WINDOW),
   defaultMaxTokens: z.number().step(1).min(1).default(DEFAULT_MAX_OUTPUT),
   connectTimeoutMs: z.natural(),
   firstChunkTimeoutMs: z.natural(),
   streamIdleTimeoutMs: z.natural(),
-  rateLimitRetries: z.number().int().min(0).max(4),
-  accountFailover: z.number().int().min(1).max(8),
+  // `z.natural()` is schemastery's integer: `.int()` does not exist, and a schema that
+  // throws here stops the plugin from loading at all.
+  // The harness' own schema: the settings UI renders the fields it knows, and a
+  // policy that does not fit is refused there rather than at the first retry.
+  retryPolicy: RetryPolicySchema,
+  rateLimitRetries: z.natural().max(4),
+  accountFailover: z.natural().min(1).max(8),
   repairToolCalls: z.boolean(),
 })
 
@@ -164,9 +174,10 @@ export async function apply(ctx, config) {
       profileArn: profile.profileArn || undefined,
       surfaces: Array.isArray(profile.surfaces) && profile.surfaces.length > 0 ? profile.surfaces : undefined,
       baseUrl: profile.baseUrl || undefined,
-      // The harness mandates its attribution headers on every provider request;
-      // Kiro's own fingerprint User-Agent is built in the transport and is not
-      // overridden here, because the data plane rejects a mismatched pair.
+      // The harness mandates its attribution headers on every provider request. They
+      // are passed through, and the transport drops the ones Kiro reads as a client
+      // fingerprint (`user-agent` and friends), because the data plane rejects a
+      // mismatched pair - which is the error that looks like "Kiro models need Kiro".
       extraHeaders: { ...safeAttribution(), ...(profile.headers || {}) },
       connectTimeoutMs: profile.connectTimeoutMs,
       firstChunkTimeoutMs: profile.firstChunkTimeoutMs,
@@ -249,6 +260,7 @@ export async function apply(ctx, config) {
   const { adapter, refreshCatalog, modelsFor } = createKiroAdapter({
     LlmAdapter,
     LlmError,
+    RetryPolicySchema,
     store,
     usage,
     log,
